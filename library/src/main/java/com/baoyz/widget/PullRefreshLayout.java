@@ -59,6 +59,8 @@ public class PullRefreshLayout extends ViewGroup {
     private boolean mDispatchTargetTouchDown;
     private float mDragPercent;
 
+    private float mPreMotionOffset = 0;
+
     public PullRefreshLayout(Context context) {
         this(context, null);
     }
@@ -171,7 +173,7 @@ public class PullRefreshLayout extends ViewGroup {
     @Override
     public boolean onInterceptTouchEvent(MotionEvent ev) {
 
-        if (!isEnabled() || (canChildScrollUp() && !mRefreshing)) {
+        if (!isEnabled()) {
             return false;
         }
 
@@ -192,6 +194,7 @@ public class PullRefreshLayout extends ViewGroup {
                 mInitialOffsetTop = mCurrentOffsetTop;
                 mDispatchTargetTouchDown = false;
                 mDragPercent = 0;
+                mPreMotionOffset = 0;
                 break;
             case MotionEvent.ACTION_MOVE:
                 if (mActivePointerId == INVALID_POINTER) {
@@ -202,10 +205,24 @@ public class PullRefreshLayout extends ViewGroup {
                     return false;
                 }
                 final float yDiff = y - mInitialMotionY;
-                if (mRefreshing) {
-                    mIsBeingDragged = !(yDiff < 0 && mCurrentOffsetTop <= 0);
-                } else if (yDiff > mTouchSlop && !mIsBeingDragged) {
-                    mIsBeingDragged = true;
+                if(yDiff > 0){
+                    if(canChildScrollUp() && !mRefreshing){
+                        return false;
+                    }else{
+                        if (mRefreshing) {
+                            mIsBeingDragged = !(yDiff < 0 && mCurrentOffsetTop <= 0);
+                        } else if (yDiff > mTouchSlop && !mIsBeingDragged) {
+                            mIsBeingDragged = true;
+                        }
+                    }
+                }else{
+                    if(canChildScrollDown()){
+                        return false;
+                    }else{
+                        if(-yDiff > mTouchSlop){
+                            mIsBeingDragged = true;
+                        }
+                    }
                 }
                 break;
             case MotionEvent.ACTION_UP:
@@ -240,22 +257,14 @@ public class PullRefreshLayout extends ViewGroup {
                 final float y = MotionEventCompat.getY(ev, pointerIndex);
                 final float yDiff = y - mInitialMotionY;
                 int targetY;
-                if (mRefreshing) {
-                    targetY = (int) (mInitialOffsetTop + yDiff);
-                    if (canChildScrollUp()) {
-                        targetY = -1;
-                        mInitialMotionY = y;
-                        mInitialOffsetTop = 0;
-                        if (mDispatchTargetTouchDown) {
-                            mTarget.dispatchTouchEvent(ev);
-                        } else {
-                            MotionEvent obtain = MotionEvent.obtain(ev);
-                            obtain.setAction(MotionEvent.ACTION_DOWN);
-                            mDispatchTargetTouchDown = true;
-                            mTarget.dispatchTouchEvent(obtain);
-                        }
-                    } else {
-                        if (targetY < 0) {
+
+                if(yDiff > 0){
+                    if (mRefreshing) {
+                        targetY = (int) (mInitialOffsetTop + yDiff);
+                        if (canChildScrollUp()) {
+                            targetY = -1;
+                            mInitialMotionY = y;
+                            mInitialOffsetTop = 0;
                             if (mDispatchTargetTouchDown) {
                                 mTarget.dispatchTouchEvent(ev);
                             } else {
@@ -264,41 +273,65 @@ public class PullRefreshLayout extends ViewGroup {
                                 mDispatchTargetTouchDown = true;
                                 mTarget.dispatchTouchEvent(obtain);
                             }
-                            targetY = 0;
-                        } else if (targetY > mTotalDragDistance) {
-                            targetY = mTotalDragDistance;
                         } else {
-                            if (mDispatchTargetTouchDown) {
-                                MotionEvent obtain = MotionEvent.obtain(ev);
-                                obtain.setAction(MotionEvent.ACTION_CANCEL);
-                                mDispatchTargetTouchDown = false;
-                                mTarget.dispatchTouchEvent(obtain);
+                            if (targetY < 0) {
+                                if (mDispatchTargetTouchDown) {
+                                    mTarget.dispatchTouchEvent(ev);
+                                } else {
+                                    MotionEvent obtain = MotionEvent.obtain(ev);
+                                    obtain.setAction(MotionEvent.ACTION_DOWN);
+                                    mDispatchTargetTouchDown = true;
+                                    mTarget.dispatchTouchEvent(obtain);
+                                }
+                                targetY = 0;
+                            } else if (targetY > mTotalDragDistance) {
+                                targetY = mTotalDragDistance;
+                            } else {
+                                if (mDispatchTargetTouchDown) {
+                                    MotionEvent obtain = MotionEvent.obtain(ev);
+                                    obtain.setAction(MotionEvent.ACTION_CANCEL);
+                                    mDispatchTargetTouchDown = false;
+                                    mTarget.dispatchTouchEvent(obtain);
+                                }
                             }
                         }
+                    } else {
+                        final float scrollTop = yDiff * DRAG_RATE;
+                        float originalDragPercent = scrollTop / mTotalDragDistance;
+                        if (originalDragPercent < 0) {
+                            return false;
+                        }
+                        mDragPercent = Math.min(1f, Math.abs(originalDragPercent));
+                        float extraOS = Math.abs(scrollTop) - mTotalDragDistance;
+                        float slingshotDist = mSpinnerFinalOffset;
+                        float tensionSlingshotPercent = Math.max(0,
+                                Math.min(extraOS, slingshotDist * 2) / slingshotDist);
+                        float tensionPercent = (float) ((tensionSlingshotPercent / 4) - Math.pow(
+                                (tensionSlingshotPercent / 4), 2)) * 2f;
+                        float extraMove = (slingshotDist) * tensionPercent * 2;
+                        targetY = (int) ((slingshotDist * mDragPercent) + extraMove);
+                        if (mRefreshView.getVisibility() != View.VISIBLE) {
+                            mRefreshView.setVisibility(View.VISIBLE);
+                        }
+                        if (scrollTop < mTotalDragDistance) {
+                            mRefreshDrawable.setPercent(mDragPercent);
+                        }
                     }
-                } else {
-                    final float scrollTop = yDiff * DRAG_RATE;
-                    float originalDragPercent = scrollTop / mTotalDragDistance;
-                    if (originalDragPercent < 0) {
+                    setTargetOffsetTop(targetY - mCurrentOffsetTop, true);
+                }else{
+                    final float scrollBottom = yDiff * DRAG_RATE;
+                    float originalDragPercent = scrollBottom / mTotalDragDistance;
+                    if (originalDragPercent > 0) {
                         return false;
                     }
-                    mDragPercent = Math.min(1f, Math.abs(originalDragPercent));
-                    float extraOS = Math.abs(scrollTop) - mTotalDragDistance;
-                    float slingshotDist = mSpinnerFinalOffset;
-                    float tensionSlingshotPercent = Math.max(0,
-                            Math.min(extraOS, slingshotDist * 2) / slingshotDist);
-                    float tensionPercent = (float) ((tensionSlingshotPercent / 4) - Math.pow(
-                            (tensionSlingshotPercent / 4), 2)) * 2f;
-                    float extraMove = (slingshotDist) * tensionPercent * 2;
-                    targetY = (int) ((slingshotDist * mDragPercent) + extraMove);
-                    if (mRefreshView.getVisibility() != View.VISIBLE) {
-                        mRefreshView.setVisibility(View.VISIBLE);
-                    }
-                    if (scrollTop < mTotalDragDistance) {
-                        mRefreshDrawable.setPercent(mDragPercent);
+                    mTarget.offsetTopAndBottom((int)scrollBottom - mCurrentOffsetTop);
+                    mCurrentOffsetTop = mTarget.getTop();
+                    if (android.os.Build.VERSION.SDK_INT < 11) {
+                        invalidate();
                     }
                 }
-                setTargetOffsetTop(targetY - mCurrentOffsetTop, true);
+
+                mPreMotionOffset = yDiff;
                 break;
             }
             case MotionEventCompat.ACTION_POINTER_DOWN:
@@ -480,6 +513,10 @@ public class PullRefreshLayout extends ViewGroup {
         }
     }
 
+    /**
+     * 判断target是否可以向上滚动
+     * @return true：可以向上滚动，最上边内容还没显示出来
+     */
     private boolean canChildScrollUp() {
         if (android.os.Build.VERSION.SDK_INT < 14) {
             if (mTarget instanceof AbsListView) {
@@ -492,6 +529,25 @@ public class PullRefreshLayout extends ViewGroup {
             }
         } else {
             return ViewCompat.canScrollVertically(mTarget, -1);
+        }
+    }
+
+    /**
+     * 判断target是否可以向下滚动
+     * @return true：可以向下滚动，最下边内容还未显示出来
+     */
+    private boolean canChildScrollDown() {
+        if (android.os.Build.VERSION.SDK_INT < 14) {
+            if (mTarget instanceof AbsListView) {//判断ListView,GridView
+                final AbsListView absListView = (AbsListView) mTarget;
+                return absListView.getChildCount() > 0
+                        && (absListView.getFirstVisiblePosition() < absListView.getChildCount() || absListView.getChildAt(absListView.getChildCount() - 1)
+                        .getBottom() > absListView.getPaddingBottom());
+            } else {//目测是判断ScrollView
+                return mTarget.getHeight() > mTarget.getScrollY() + getHeight();
+            }
+        } else {
+            return ViewCompat.canScrollVertically(mTarget, 1);
         }
     }
 
